@@ -148,10 +148,10 @@ export const DocumentSigningDateField = ({
       )}
 
       {field.inserted && (
-        <div className="flex h-full w-full items-center">
+        <div className="flex h-full w-full items-center overflow-hidden">
           <p
             className={cn(
-              'w-full whitespace-pre-wrap text-left text-[clamp(0.425rem,25cqw,0.825rem)] text-foreground duration-200 [overflow-wrap:anywhere]',
+              'w-full truncate text-left text-[clamp(0.425rem,18cqw,0.825rem)] text-foreground duration-200',
               {
                 '!text-center': parsedFieldMeta?.textAlign === 'center',
                 '!text-right': parsedFieldMeta?.textAlign === 'right',
