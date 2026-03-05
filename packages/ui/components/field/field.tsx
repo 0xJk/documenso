@@ -58,7 +58,7 @@ export function FieldContainerPortal({
   }, [coords, maxWidth, isCheckboxOrRadioField]);
 
   return createPortal(
-    <div className={cn('absolute', className)} style={style}>
+    <div className={cn('absolute [container-type:size]', className)} style={style}>
       {children}
     </div>,
     alternativePortalRoot ?? document.body,
