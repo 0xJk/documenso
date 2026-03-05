@@ -416,7 +416,7 @@ export const generateSampleWebhookPayload = (
           subject: '',
           message: '',
           timezone: 'Etc/UTC',
-          dateFormat: 'yyyy-MM-dd hh:mm a',
+          dateFormat: 'dd-MM-yyyy',
           redirectUrl: '',
           emailSettings: {
             documentDeleted: true,

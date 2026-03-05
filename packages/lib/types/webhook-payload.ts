@@ -148,7 +148,7 @@ export const mapEnvelopeToWebhookDocumentPayload = (
           ...documentMeta,
           // Not sure why is optional in the prisma schema.
           timezone: 'Etc/UTC',
-          dateFormat: 'yyyy-MM-dd hh:mm a',
+          dateFormat: 'dd-MM-yyyy',
         }
       : null,
     Recipient: mappedRecipients,
