@@ -512,7 +512,7 @@ test('[DOCUMENT_FLOW]: should be able to sign a document with custom date', asyn
     },
   });
 
-  const insertedDate = DateTime.fromFormat(field?.customText ?? '', 'yyyy-MM-dd hh:mm a');
+  const insertedDate = DateTime.fromFormat(field?.customText ?? '', 'dd-MM-yyyy');
 
   expect(Math.abs(insertedDate.diff(now).minutes)).toBeLessThanOrEqual(1);
 
