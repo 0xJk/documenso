@@ -6,7 +6,7 @@ import { OrganisationMemberInviteStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 
 import { syncMemberCountWithStripeSeatPlan } from '@documenso/ee/server-only/stripe/update-subscription-item-quantity';
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import { OrganisationInviteEmailTemplate } from '@documenso/email/templates/organisation-invite';
 import { NEXT_PUBLIC_WEBAPP_URL } from '@documenso/lib/constants/app';
 import { ORGANISATION_MEMBER_ROLE_PERMISSIONS_MAP } from '@documenso/lib/constants/organisations';
@@ -140,27 +140,34 @@ export const createOrganisationMemberInvites = async ({
     data: organisationMemberInvites,
   });
 
-  const sendEmailResult = await Promise.allSettled(
-    organisationMemberInvites.map(async ({ email, token }) =>
-      sendOrganisationMemberInviteEmail({
+  const sendEmailErrors: Array<{ email: string; error: unknown }> = [];
+  let hasSentEmail = false;
+
+  for (const { email, token } of organisationMemberInvites) {
+    if (hasSentEmail) {
+      await rateLimitDelay();
+    }
+
+    try {
+      await sendOrganisationMemberInviteEmail({
         email,
         token,
         organisation,
         senderName: userName,
-      }),
-    ),
-  );
+      });
+    } catch (error) {
+      sendEmailErrors.push({ email, error });
+    }
 
-  const sendEmailResultErrorList = sendEmailResult.filter(
-    (result): result is PromiseRejectedResult => result.status === 'rejected',
-  );
+    hasSentEmail = true;
+  }
 
-  if (sendEmailResultErrorList.length > 0) {
-    console.error(JSON.stringify(sendEmailResultErrorList));
+  if (sendEmailErrors.length > 0) {
+    console.error(JSON.stringify(sendEmailErrors));
 
     throw new AppError('EmailDeliveryFailed', {
       message: 'Failed to send invite emails to one or more users.',
-      userMessage: `Failed to send invites to ${sendEmailResultErrorList.length}/${organisationMemberInvites.length} users.`,
+      userMessage: `Failed to send invites to ${sendEmailErrors.length}/${organisationMemberInvites.length} users.`,
     });
   }
 };
@@ -211,7 +218,7 @@ export const sendOrganisationMemberInviteEmail = async ({
 
   const i18n = await getI18nInstance(emailLanguage);
 
-  await mailer.sendMail({
+  await sendMailWithRetry({
     to: email,
     from: senderEmail,
     subject: i18n._(msg`You have been invited to join ${organisation.name} on Documenso`),

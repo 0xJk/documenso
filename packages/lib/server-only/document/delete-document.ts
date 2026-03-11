@@ -4,7 +4,7 @@ import { msg } from '@lingui/core/macro';
 import type { DocumentMeta, Envelope, Recipient, User } from '@prisma/client';
 import { DocumentStatus, EnvelopeType, SendStatus, WebhookTriggerEvents } from '@prisma/client';
 
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import DocumentCancelTemplate from '@documenso/email/templates/document-cancel';
 import { prisma } from '@documenso/prisma';
 
@@ -208,45 +208,50 @@ const handleDocumentOwnerDelete = async ({
   }
 
   // Send cancellation emails to recipients.
-  await Promise.all(
-    envelope.recipients.map(async (recipient) => {
-      if (recipient.sendStatus !== SendStatus.SENT || !isRecipientEmailValidForSending(recipient)) {
-        return;
-      }
+  const i18n = await getI18nInstance(emailLanguage);
+  let hasSentEmail = false;
 
-      const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
+  for (const recipient of envelope.recipients) {
+    if (recipient.sendStatus !== SendStatus.SENT || !isRecipientEmailValidForSending(recipient)) {
+      continue;
+    }
 
-      const template = createElement(DocumentCancelTemplate, {
-        documentName: envelope.title,
-        inviterName: user.name || undefined,
-        inviterEmail: user.email,
-        assetBaseUrl,
-      });
+    if (hasSentEmail) {
+      await rateLimitDelay();
+    }
 
-      const [html, text] = await Promise.all([
-        renderEmailWithI18N(template, { lang: emailLanguage, branding }),
-        renderEmailWithI18N(template, {
-          lang: emailLanguage,
-          branding,
-          plainText: true,
-        }),
-      ]);
+    const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
 
-      const i18n = await getI18nInstance(emailLanguage);
+    const template = createElement(DocumentCancelTemplate, {
+      documentName: envelope.title,
+      inviterName: user.name || undefined,
+      inviterEmail: user.email,
+      assetBaseUrl,
+    });
 
-      await mailer.sendMail({
-        to: {
-          address: recipient.email,
-          name: recipient.name,
-        },
-        from: senderEmail,
-        replyTo: replyToEmail,
-        subject: i18n._(msg`Document Cancelled`),
-        html,
-        text,
-      });
-    }),
-  );
+    const [html, text] = await Promise.all([
+      renderEmailWithI18N(template, { lang: emailLanguage, branding }),
+      renderEmailWithI18N(template, {
+        lang: emailLanguage,
+        branding,
+        plainText: true,
+      }),
+    ]);
+
+    await sendMailWithRetry({
+      to: {
+        address: recipient.email,
+        name: recipient.name,
+      },
+      from: senderEmail,
+      replyTo: replyToEmail,
+      subject: i18n._(msg`Document Cancelled`),
+      html,
+      text,
+    });
+
+    hasSentEmail = true;
+  }
 
   return deletedEnvelope;
 };

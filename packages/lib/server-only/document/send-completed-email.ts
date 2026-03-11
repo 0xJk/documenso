@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { msg } from '@lingui/core/macro';
 import { DocumentSource, EnvelopeType } from '@prisma/client';
 
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import { DocumentCompletedEmailTemplate } from '@documenso/email/templates/document-completed';
 import { prisma } from '@documenso/prisma';
 
@@ -113,6 +113,8 @@ export const sendCompletedEmail = async ({ id, requestMetadata }: SendDocumentOp
   const isDocumentCompletedEmailEnabled = emailSettings.documentCompleted;
   const isOwnerDocumentCompletedEmailEnabled = emailSettings.ownerDocumentCompleted;
 
+  let hasSentEmail = false;
+
   // Send email to document owner if:
   // 1. Owner document completed emails are enabled AND
   // 2. Either:
@@ -140,7 +142,7 @@ export const sendCompletedEmail = async ({ id, requestMetadata }: SendDocumentOp
 
     const i18n = await getI18nInstance(emailLanguage);
 
-    await mailer.sendMail({
+    await sendMailWithRetry({
       to: [
         {
           name: owner.name || '',
@@ -171,6 +173,8 @@ export const sendCompletedEmail = async ({ id, requestMetadata }: SendDocumentOp
         },
       }),
     });
+
+    hasSentEmail = true;
   }
 
   if (!isDocumentCompletedEmailEnabled) {
@@ -181,71 +185,75 @@ export const sendCompletedEmail = async ({ id, requestMetadata }: SendDocumentOp
     isRecipientEmailValidForSending(recipient),
   );
 
-  await Promise.all(
-    recipientsToNotify.map(async (recipient) => {
-      const customEmailTemplate = {
-        'signer.name': recipient.name,
-        'signer.email': recipient.email,
-        'document.name': envelope.title,
-      };
+  for (const recipient of recipientsToNotify) {
+    if (hasSentEmail) {
+      await rateLimitDelay();
+    }
 
-      const downloadLink = `${NEXT_PUBLIC_WEBAPP_URL()}/sign/${recipient.token}/complete`;
+    const customEmailTemplate = {
+      'signer.name': recipient.name,
+      'signer.email': recipient.email,
+      'document.name': envelope.title,
+    };
 
-      const template = createElement(DocumentCompletedEmailTemplate, {
-        documentName: envelope.title,
-        assetBaseUrl,
-        downloadLink: recipient.email === owner.email ? documentOwnerDownloadLink : downloadLink,
-        customBody:
-          isDirectTemplate && envelope.documentMeta?.message
-            ? renderCustomEmailTemplate(envelope.documentMeta.message, customEmailTemplate)
-            : undefined,
-      });
+    const downloadLink = `${NEXT_PUBLIC_WEBAPP_URL()}/sign/${recipient.token}/complete`;
 
-      const [html, text] = await Promise.all([
-        renderEmailWithI18N(template, { lang: emailLanguage, branding }),
-        renderEmailWithI18N(template, {
-          lang: emailLanguage,
-          branding,
-          plainText: true,
-        }),
-      ]);
+    const template = createElement(DocumentCompletedEmailTemplate, {
+      documentName: envelope.title,
+      assetBaseUrl,
+      downloadLink: recipient.email === owner.email ? documentOwnerDownloadLink : downloadLink,
+      customBody:
+        isDirectTemplate && envelope.documentMeta?.message
+          ? renderCustomEmailTemplate(envelope.documentMeta.message, customEmailTemplate)
+          : undefined,
+    });
 
-      const i18n = await getI18nInstance(emailLanguage);
+    const [html, text] = await Promise.all([
+      renderEmailWithI18N(template, { lang: emailLanguage, branding }),
+      renderEmailWithI18N(template, {
+        lang: emailLanguage,
+        branding,
+        plainText: true,
+      }),
+    ]);
 
-      await mailer.sendMail({
-        to: [
-          {
-            name: recipient.name,
-            address: recipient.email,
-          },
-        ],
-        from: senderEmail,
-        replyTo: replyToEmail,
-        subject:
-          isDirectTemplate && envelope.documentMeta?.subject
-            ? renderCustomEmailTemplate(envelope.documentMeta.subject, customEmailTemplate)
-            : i18n._(msg`Signing Complete!`),
-        html,
-        text,
-        attachments: completedDocumentEmailAttachments,
-      });
+    const i18n = await getI18nInstance(emailLanguage);
 
-      await prisma.documentAuditLog.create({
-        data: createDocumentAuditLogData({
-          type: DOCUMENT_AUDIT_LOG_TYPE.EMAIL_SENT,
-          envelopeId: envelope.id,
-          user: null,
-          requestMetadata,
-          data: {
-            emailType: 'DOCUMENT_COMPLETED',
-            recipientEmail: recipient.email,
-            recipientName: recipient.name,
-            recipientId: recipient.id,
-            recipientRole: recipient.role,
-            isResending: false,
-          },
-        }),
-      });
-    }),
-  );
+    await sendMailWithRetry({
+      to: [
+        {
+          name: recipient.name,
+          address: recipient.email,
+        },
+      ],
+      from: senderEmail,
+      replyTo: replyToEmail,
+      subject:
+        isDirectTemplate && envelope.documentMeta?.subject
+          ? renderCustomEmailTemplate(envelope.documentMeta.subject, customEmailTemplate)
+          : i18n._(msg`Signing Complete!`),
+      html,
+      text,
+      attachments: completedDocumentEmailAttachments,
+    });
+
+    await prisma.documentAuditLog.create({
+      data: createDocumentAuditLogData({
+        type: DOCUMENT_AUDIT_LOG_TYPE.EMAIL_SENT,
+        envelopeId: envelope.id,
+        user: null,
+        requestMetadata,
+        data: {
+          emailType: 'DOCUMENT_COMPLETED',
+          recipientEmail: recipient.email,
+          recipientName: recipient.name,
+          recipientId: recipient.id,
+          recipientRole: recipient.role,
+          isResending: false,
+        },
+      }),
+    });
+
+    hasSentEmail = true;
+  }
 };

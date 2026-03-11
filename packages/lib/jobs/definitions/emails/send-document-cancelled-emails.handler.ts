@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { msg } from '@lingui/core/macro';
 import { EnvelopeType, ReadStatus, SendStatus, SigningStatus } from '@prisma/client';
 
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import DocumentCancelTemplate from '@documenso/email/templates/document-cancel';
 import { isRecipientEmailValidForSending } from '@documenso/lib/utils/recipients';
 import { prisma } from '@documenso/prisma';
@@ -83,37 +83,36 @@ export const run = async ({
   );
 
   await io.runTask('send-cancellation-emails', async () => {
-    await Promise.all(
-      recipientsToNotify.map(async (recipient) => {
-        const template = createElement(DocumentCancelTemplate, {
-          documentName: envelope.title,
-          inviterName: documentOwner.name || undefined,
-          inviterEmail: documentOwner.email,
-          assetBaseUrl: NEXT_PUBLIC_WEBAPP_URL(),
-          cancellationReason: cancellationReason || 'The document has been cancelled.',
-        });
+    let hasSentEmail = false;
 
-        const [html, text] = await Promise.all([
-          renderEmailWithI18N(template, { lang: emailLanguage, branding }),
-          renderEmailWithI18N(template, {
-            lang: emailLanguage,
-            branding,
-            plainText: true,
-          }),
-        ]);
+    for (const recipient of recipientsToNotify) {
+      if (hasSentEmail) {
+        await rateLimitDelay();
+      }
 
-        await mailer.sendMail({
-          to: {
-            name: recipient.name,
-            address: recipient.email,
-          },
-          from: senderEmail,
-          replyTo: replyToEmail,
-          subject: i18n._(msg`Document "${envelope.title}" Cancelled`),
-          html,
-          text,
-        });
-      }),
-    );
+      const template = createElement(DocumentCancelTemplate, {
+        documentName: envelope.title,
+        inviterName: documentOwner.name || undefined,
+        inviterEmail: documentOwner.email,
+        assetBaseUrl: NEXT_PUBLIC_WEBAPP_URL(),
+        cancellationReason: cancellationReason || 'The document has been cancelled.',
+      });
+
+      const [html, text] = await Promise.all([
+        renderEmailWithI18N(template, { lang: emailLanguage, branding }),
+        renderEmailWithI18N(template, { lang: emailLanguage, branding, plainText: true }),
+      ]);
+
+      await sendMailWithRetry({
+        to: { name: recipient.name, address: recipient.email },
+        from: senderEmail,
+        replyTo: replyToEmail,
+        subject: i18n._(msg`Document "${envelope.title}" Cancelled`),
+        html,
+        text,
+      });
+
+      hasSentEmail = true;
+    }
   });
 };

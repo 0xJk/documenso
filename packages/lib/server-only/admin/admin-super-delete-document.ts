@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { msg } from '@lingui/core/macro';
 import { DocumentStatus, SendStatus } from '@prisma/client';
 
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import DocumentCancelTemplate from '@documenso/email/templates/document-cancel';
 import { prisma } from '@documenso/prisma';
 
@@ -75,46 +75,50 @@ export const adminSuperDeleteDocument = async ({
     recipientsToNotify.length > 0 &&
     isDocumentDeletedEmailEnabled
   ) {
-    await Promise.all(
-      recipientsToNotify.map(async (recipient) => {
-        if (recipient.sendStatus !== SendStatus.SENT) {
-          return;
-        }
+    const lang = envelope.documentMeta?.language ?? settings.documentLanguage;
+    const i18n = await getI18nInstance(lang);
+    let hasSentEmail = false;
 
-        const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
-        const template = createElement(DocumentCancelTemplate, {
-          documentName: envelope.title,
-          inviterName: user.name || undefined,
-          inviterEmail: user.email,
-          assetBaseUrl,
-        });
+    for (const recipient of recipientsToNotify) {
+      if (recipient.sendStatus !== SendStatus.SENT) {
+        continue;
+      }
 
-        const lang = envelope.documentMeta?.language ?? settings.documentLanguage;
+      if (hasSentEmail) {
+        await rateLimitDelay();
+      }
 
-        const [html, text] = await Promise.all([
-          renderEmailWithI18N(template, { lang, branding }),
-          renderEmailWithI18N(template, {
-            lang,
-            branding,
-            plainText: true,
-          }),
-        ]);
+      const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
+      const template = createElement(DocumentCancelTemplate, {
+        documentName: envelope.title,
+        inviterName: user.name || undefined,
+        inviterEmail: user.email,
+        assetBaseUrl,
+      });
 
-        const i18n = await getI18nInstance(lang);
+      const [html, text] = await Promise.all([
+        renderEmailWithI18N(template, { lang, branding }),
+        renderEmailWithI18N(template, {
+          lang,
+          branding,
+          plainText: true,
+        }),
+      ]);
 
-        await mailer.sendMail({
-          to: {
-            address: recipient.email,
-            name: recipient.name,
-          },
-          from: senderEmail,
-          replyTo: replyToEmail,
-          subject: i18n._(msg`Document Cancelled`),
-          html,
-          text,
-        });
-      }),
-    );
+      await sendMailWithRetry({
+        to: {
+          address: recipient.email,
+          name: recipient.name,
+        },
+        from: senderEmail,
+        replyTo: replyToEmail,
+        subject: i18n._(msg`Document Cancelled`),
+        html,
+        text,
+      });
+
+      hasSentEmail = true;
+    }
   }
 
   // always hard delete if deleted from admin

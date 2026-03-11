@@ -6,7 +6,7 @@ import { EnvelopeType, RecipientRole } from '@prisma/client';
 import { SendStatus, SigningStatus } from '@prisma/client';
 import { isDeepEqual } from 'remeda';
 
-import { mailer } from '@documenso/email/mailer';
+import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
 import RecipientRemovedFromDocumentTemplate from '@documenso/email/templates/recipient-removed-from-document';
 import { DOCUMENT_AUDIT_LOG_TYPE } from '@documenso/lib/types/document-audit-logs';
 import type { TRecipientAccessAuthTypes } from '@documenso/lib/types/document-auth';
@@ -295,45 +295,51 @@ export const setDocumentRecipients = async ({
     ).recipientRemoved;
 
     // Send emails to deleted recipients who have emails.
-    await Promise.all(
-      removedRecipients.map(async (recipient) => {
-        if (
-          recipient.sendStatus !== SendStatus.SENT ||
-          recipient.role === RecipientRole.CC ||
-          !isRecipientRemovedEmailEnabled ||
-          !isRecipientEmailValidForSending(recipient)
-        ) {
-          return;
-        }
+    let hasSentEmail = false;
 
-        const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
+    for (const recipient of removedRecipients) {
+      if (
+        recipient.sendStatus !== SendStatus.SENT ||
+        recipient.role === RecipientRole.CC ||
+        !isRecipientRemovedEmailEnabled ||
+        !isRecipientEmailValidForSending(recipient)
+      ) {
+        continue;
+      }
 
-        const template = createElement(RecipientRemovedFromDocumentTemplate, {
-          documentName: envelope.title,
-          inviterName: user.name || undefined,
-          assetBaseUrl,
-        });
+      if (hasSentEmail) {
+        await rateLimitDelay();
+      }
 
-        const [html, text] = await Promise.all([
-          renderEmailWithI18N(template, { lang: emailLanguage, branding }),
-          renderEmailWithI18N(template, { lang: emailLanguage, branding, plainText: true }),
-        ]);
+      const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
 
-        const i18n = await getI18nInstance(emailLanguage);
+      const template = createElement(RecipientRemovedFromDocumentTemplate, {
+        documentName: envelope.title,
+        inviterName: user.name || undefined,
+        assetBaseUrl,
+      });
 
-        await mailer.sendMail({
-          to: {
-            address: recipient.email,
-            name: recipient.name,
-          },
-          from: senderEmail,
-          replyTo: replyToEmail,
-          subject: i18n._(msg`You have been removed from a document`),
-          html,
-          text,
-        });
-      }),
-    );
+      const [html, text] = await Promise.all([
+        renderEmailWithI18N(template, { lang: emailLanguage, branding }),
+        renderEmailWithI18N(template, { lang: emailLanguage, branding, plainText: true }),
+      ]);
+
+      const i18n = await getI18nInstance(emailLanguage);
+
+      await sendMailWithRetry({
+        to: {
+          address: recipient.email,
+          name: recipient.name,
+        },
+        from: senderEmail,
+        replyTo: replyToEmail,
+        subject: i18n._(msg`You have been removed from a document`),
+        html,
+        text,
+      });
+
+      hasSentEmail = true;
+    }
   }
 
   // Filter out recipients that have been removed or have been updated.
