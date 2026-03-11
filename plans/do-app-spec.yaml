@@ -1,0 +1,85 @@
+alerts:
+- rule: DEPLOYMENT_FAILED
+- rule: DOMAIN_FAILED
+databases:
+- engine: PG
+  name: dev-db-029189
+  version: "17"
+name: documenso
+region: syd
+services:
+- name: documenso
+  github:
+    branch: main
+    deploy_on_push: true
+    repo: 0xJk/documenso
+  dockerfile_path: docker/Dockerfile
+  source_dir: /
+  http_port: 3000
+  instance_count: 1
+  instance_size_slug: apps-s-1vcpu-1gb
+  health_check:
+    failure_threshold: 9
+    period_seconds: 10
+    success_threshold: 1
+    timeout_seconds: 1
+  liveness_health_check:
+    failure_threshold: 9
+    http_path: /api/health
+    period_seconds: 10
+    success_threshold: 1
+    timeout_seconds: 1
+  envs:
+  - key: NEXT_PRIVATE_DATABASE_URL
+    scope: RUN_TIME
+    value: ${dev-db-029189.DATABASE_URL}
+  - key: NEXT_PRIVATE_DIRECT_DATABASE_URL
+    scope: RUN_TIME
+    value: ${dev-db-029189.DATABASE_URL}
+  - key: NEXTAUTH_SECRET
+    scope: RUN_TIME
+    type: SECRET
+    value: "Yjo0B6GdvQaGM30zchhngM81hl/cJgY4Qdx/9z4Jtcw="
+  - key: NEXT_PRIVATE_ENCRYPTION_KEY
+    scope: RUN_TIME
+    type: SECRET
+    value: "b53737de9268c9eae81f2e95382234a0"
+  - key: NEXT_PRIVATE_ENCRYPTION_SECONDARY_KEY
+    scope: RUN_TIME
+    type: SECRET
+    value: "df53ffc756af0d455aacac62442826b7"
+  - key: NEXT_PUBLIC_WEBAPP_URL
+    scope: RUN_TIME
+    value: "https://placeholder.ondigitalocean.app"
+  - key: NEXT_PRIVATE_INTERNAL_WEBAPP_URL
+    scope: RUN_TIME
+    value: "http://localhost:3000"
+  - key: NEXT_PRIVATE_SMTP_TRANSPORT
+    scope: RUN_TIME
+    value: "smtp-auth"
+  - key: NEXT_PRIVATE_SMTP_HOST
+    scope: RUN_TIME
+    value: "<从Render复制>"
+  - key: NEXT_PRIVATE_SMTP_PORT
+    scope: RUN_TIME
+    value: "<从Render复制>"
+  - key: NEXT_PRIVATE_SMTP_USERNAME
+    scope: RUN_TIME
+    value: "<从Render复制>"
+  - key: NEXT_PRIVATE_SMTP_PASSWORD
+    scope: RUN_TIME
+    type: SECRET
+    value: "<从Render复制>"
+  - key: NEXT_PRIVATE_SMTP_FROM_NAME
+    scope: RUN_TIME
+    value: "Aline Docsign"
+  - key: NEXT_PRIVATE_SMTP_FROM_ADDRESS
+    scope: RUN_TIME
+    value: "<从Render复制>"
+ingress:
+  rules:
+  - component:
+      name: documenso
+    match:
+      path:
+        prefix: /

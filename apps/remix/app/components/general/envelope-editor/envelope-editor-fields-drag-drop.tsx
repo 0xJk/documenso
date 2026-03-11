@@ -31,7 +31,7 @@ const MIN_HEIGHT_PX = 12;
 const MIN_WIDTH_PX = 36;
 
 const DEFAULT_HEIGHT_PX = MIN_HEIGHT_PX * 2.5;
-const DEFAULT_WIDTH_PX = MIN_WIDTH_PX * 3.5;
+const DEFAULT_WIDTH_PX = MIN_WIDTH_PX * 5.25;
 
 export const fieldButtonList = [
   {
