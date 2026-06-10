@@ -1,22 +1,16 @@
-import { createElement } from 'react';
-
-import { msg } from '@lingui/core/macro';
-import type { DocumentMeta, Envelope, Recipient, User } from '@prisma/client';
-import { DocumentStatus, EnvelopeType, SendStatus, WebhookTriggerEvents } from '@prisma/client';
-
-import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
+import { sendMailWithRetry } from '@documenso/email/mailer';
 import DocumentCancelTemplate from '@documenso/email/templates/document-cancel';
 import { prisma } from '@documenso/prisma';
-
+import { msg } from '@lingui/core/macro';
+import type { DocumentMeta, Envelope, Recipient, User } from '@prisma/client';
+import { DocumentStatus, EnvelopeType, RecipientRole, SendStatus, WebhookTriggerEvents } from '@prisma/client';
+import { createElement } from 'react';
 import { getI18nInstance } from '../../client-only/providers/i18n-server';
 import { NEXT_PUBLIC_WEBAPP_URL } from '../../constants/app';
 import { AppError, AppErrorCode } from '../../errors/app-error';
 import { DOCUMENT_AUDIT_LOG_TYPE } from '../../types/document-audit-logs';
 import { extractDerivedDocumentEmailSettings } from '../../types/document-email';
-import {
-  ZWebhookDocumentSchema,
-  mapEnvelopeToWebhookDocumentPayload,
-} from '../../types/webhook-payload';
+import { mapEnvelopeToWebhookDocumentPayload, ZWebhookDocumentSchema } from '../../types/webhook-payload';
 import type { ApiRequestMetadata } from '../../universal/extract-request-metadata';
 import { isDocumentCompleted } from '../../utils/document';
 import { createDocumentAuditLogData } from '../../utils/document-audit-logs';
@@ -34,12 +28,7 @@ export type DeleteDocumentOptions = {
   requestMetadata: ApiRequestMetadata;
 };
 
-export const deleteDocument = async ({
-  id,
-  userId,
-  teamId,
-  requestMetadata,
-}: DeleteDocumentOptions) => {
+export const deleteDocument = async ({ id, userId, teamId, requestMetadata }: DeleteDocumentOptions) => {
   const user = await prisma.user.findUnique({
     where: {
       id: userId,
@@ -93,6 +82,13 @@ export const deleteDocument = async ({
       user,
       requestMetadata,
     });
+
+    await triggerWebhook({
+      event: WebhookTriggerEvents.DOCUMENT_CANCELLED,
+      data: ZWebhookDocumentSchema.parse(mapEnvelopeToWebhookDocumentPayload(envelope)),
+      userId,
+      teamId,
+    });
   }
 
   // Continue to hide the document from the user if they are a recipient.
@@ -112,13 +108,6 @@ export const deleteDocument = async ({
       });
   }
 
-  await triggerWebhook({
-    event: WebhookTriggerEvents.DOCUMENT_CANCELLED,
-    data: ZWebhookDocumentSchema.parse(mapEnvelopeToWebhookDocumentPayload(envelope)),
-    userId,
-    teamId,
-  });
-
   return envelope;
 };
 
@@ -131,16 +120,12 @@ type HandleDocumentOwnerDeleteOptions = {
   requestMetadata: ApiRequestMetadata;
 };
 
-const handleDocumentOwnerDelete = async ({
-  envelope,
-  user,
-  requestMetadata,
-}: HandleDocumentOwnerDeleteOptions) => {
+const handleDocumentOwnerDelete = async ({ envelope, user, requestMetadata }: HandleDocumentOwnerDeleteOptions) => {
   if (envelope.deletedAt) {
     return;
   }
 
-  const { branding, emailLanguage, senderEmail, replyToEmail } = await getEmailContext({
+  const { branding, emailLanguage, senderEmail, replyToEmail, emailsDisabled, emailTransport } = await getEmailContext({
     emailType: 'RECIPIENT',
     source: {
       type: 'team',
@@ -199,59 +184,58 @@ const handleDocumentOwnerDelete = async ({
     });
   });
 
-  const isEnvelopeDeleteEmailEnabled = extractDerivedDocumentEmailSettings(
-    envelope.documentMeta,
-  ).documentDeleted;
+  const isEnvelopeDeleteEmailEnabled = extractDerivedDocumentEmailSettings(envelope.documentMeta).documentDeleted;
 
-  if (!isEnvelopeDeleteEmailEnabled) {
+  // Skip sending if the email is disabled for this document or the organisation
+  // has email sending disabled entirely.
+  if (!isEnvelopeDeleteEmailEnabled || emailsDisabled) {
     return deletedEnvelope;
   }
 
   // Send cancellation emails to recipients.
-  const i18n = await getI18nInstance(emailLanguage);
-  let hasSentEmail = false;
+  await Promise.all(
+    envelope.recipients.map(async (recipient) => {
+      if (
+        recipient.sendStatus !== SendStatus.SENT ||
+        !isRecipientEmailValidForSending(recipient) ||
+        recipient.role === RecipientRole.CC
+      ) {
+        return;
+      }
 
-  for (const recipient of envelope.recipients) {
-    if (recipient.sendStatus !== SendStatus.SENT || !isRecipientEmailValidForSending(recipient)) {
-      continue;
-    }
+      const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
 
-    if (hasSentEmail) {
-      await rateLimitDelay();
-    }
+      const template = createElement(DocumentCancelTemplate, {
+        documentName: envelope.title,
+        inviterName: user.name || undefined,
+        inviterEmail: user.email,
+        assetBaseUrl,
+      });
 
-    const assetBaseUrl = NEXT_PUBLIC_WEBAPP_URL() || 'http://localhost:3000';
+      const [html, text] = await Promise.all([
+        renderEmailWithI18N(template, { lang: emailLanguage, branding }),
+        renderEmailWithI18N(template, {
+          lang: emailLanguage,
+          branding,
+          plainText: true,
+        }),
+      ]);
 
-    const template = createElement(DocumentCancelTemplate, {
-      documentName: envelope.title,
-      inviterName: user.name || undefined,
-      inviterEmail: user.email,
-      assetBaseUrl,
-    });
+      const i18n = await getI18nInstance(emailLanguage);
 
-    const [html, text] = await Promise.all([
-      renderEmailWithI18N(template, { lang: emailLanguage, branding }),
-      renderEmailWithI18N(template, {
-        lang: emailLanguage,
-        branding,
-        plainText: true,
-      }),
-    ]);
-
-    await sendMailWithRetry({
-      to: {
-        address: recipient.email,
-        name: recipient.name,
-      },
-      from: senderEmail,
-      replyTo: replyToEmail,
-      subject: i18n._(msg`Document Cancelled`),
-      html,
-      text,
-    });
-
-    hasSentEmail = true;
-  }
+      await sendMailWithRetry(emailTransport, {
+        to: {
+          address: recipient.email,
+          name: recipient.name,
+        },
+        from: senderEmail,
+        replyTo: replyToEmail,
+        subject: i18n._(msg`Document Cancelled`),
+        html,
+        text,
+      });
+    }),
+  );
 
   return deletedEnvelope;
 };

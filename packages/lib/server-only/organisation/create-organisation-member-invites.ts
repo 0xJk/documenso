@@ -1,12 +1,8 @@
-import { createElement } from 'react';
-
-import { msg } from '@lingui/core/macro';
-import type { Organisation, Prisma } from '@prisma/client';
-import { OrganisationMemberInviteStatus } from '@prisma/client';
-import { nanoid } from 'nanoid';
-
-import { syncMemberCountWithStripeSeatPlan } from '@documenso/ee/server-only/stripe/update-subscription-item-quantity';
-import { rateLimitDelay, sendMailWithRetry } from '@documenso/email/mailer';
+import {
+  assertMemberCountWithinCap,
+  syncMemberCountWithStripeSeatPlan,
+} from '@documenso/ee/server-only/stripe/update-subscription-item-quantity';
+import { sendMailWithRetry } from '@documenso/email/mailer';
 import { OrganisationInviteEmailTemplate } from '@documenso/email/templates/organisation-invite';
 import { NEXT_PUBLIC_WEBAPP_URL } from '@documenso/lib/constants/app';
 import { ORGANISATION_MEMBER_ROLE_PERMISSIONS_MAP } from '@documenso/lib/constants/organisations';
@@ -14,7 +10,11 @@ import { AppError, AppErrorCode } from '@documenso/lib/errors/app-error';
 import { isOrganisationRoleWithinUserHierarchy } from '@documenso/lib/utils/organisations';
 import { prisma } from '@documenso/prisma';
 import type { TCreateOrganisationMemberInvitesRequestSchema } from '@documenso/trpc/server/organisation-router/create-organisation-member-invites.types';
-
+import { msg } from '@lingui/core/macro';
+import type { Organisation, Prisma } from '@prisma/client';
+import { OrganisationMemberInviteStatus } from '@prisma/client';
+import { nanoid } from 'nanoid';
+import { createElement } from 'react';
 import { getI18nInstance } from '../../client-only/providers/i18n-server';
 import { generateDatabaseId } from '../../universal/id';
 import { validateIfSubscriptionIsRequired } from '../../utils/billing';
@@ -101,8 +101,7 @@ export const createOrganisationMemberInvites = async ({
   });
 
   const unauthorizedRoleAccess = usersToInvite.some(
-    ({ organisationRole }) =>
-      !isOrganisationRoleWithinUserHierarchy(currentOrganisationMemberRole, organisationRole),
+    ({ organisationRole }) => !isOrganisationRoleWithinUserHierarchy(currentOrganisationMemberRole, organisationRole),
   );
 
   if (unauthorizedRoleAccess) {
@@ -111,63 +110,54 @@ export const createOrganisationMemberInvites = async ({
     });
   }
 
-  const organisationMemberInvites: Prisma.OrganisationMemberInviteCreateManyInput[] =
-    usersToInvite.map(({ email, organisationRole }) => ({
+  const organisationMemberInvites: Prisma.OrganisationMemberInviteCreateManyInput[] = usersToInvite.map(
+    ({ email, organisationRole }) => ({
       id: generateDatabaseId('member_invite'),
       email,
       organisationId,
       organisationRole,
       token: nanoid(32),
-    }));
+    }),
+  );
 
   const numberOfCurrentMembers = organisation.members.length;
   const numberOfCurrentInvites = organisation.invites.length;
   const numberOfNewInvites = organisationMemberInvites.length;
 
-  const totalMemberCountWithInvites =
-    numberOfCurrentMembers + numberOfCurrentInvites + numberOfNewInvites;
+  const totalMemberCountWithInvites = numberOfCurrentMembers + numberOfCurrentInvites + numberOfNewInvites;
 
-  // Handle billing for seat based plans.
+  // Enforce the seat cap and sync billing for seat based plans.
   if (subscription) {
-    await syncMemberCountWithStripeSeatPlan(
-      subscription,
-      organisationClaim,
-      totalMemberCountWithInvites,
-    );
+    await assertMemberCountWithinCap(subscription, organisationClaim, totalMemberCountWithInvites);
+
+    await syncMemberCountWithStripeSeatPlan(subscription, organisationClaim, totalMemberCountWithInvites);
   }
 
   await prisma.organisationMemberInvite.createMany({
     data: organisationMemberInvites,
   });
 
-  const sendEmailErrors: Array<{ email: string; error: unknown }> = [];
-  let hasSentEmail = false;
-
-  for (const { email, token } of organisationMemberInvites) {
-    if (hasSentEmail) {
-      await rateLimitDelay();
-    }
-
-    try {
-      await sendOrganisationMemberInviteEmail({
+  const sendEmailResult = await Promise.allSettled(
+    organisationMemberInvites.map(async ({ email, token }) =>
+      sendOrganisationMemberInviteEmail({
         email,
         token,
         organisation,
         senderName: userName,
-      });
-    } catch (error) {
-      sendEmailErrors.push({ email, error });
-    }
+      }),
+    ),
+  );
 
-    hasSentEmail = true;
-  }
+  const sendEmailResultErrorList = sendEmailResult.filter(
+    (result): result is PromiseRejectedResult => result.status === 'rejected',
+  );
 
-  if (sendEmailErrors.length > 0) {
-    console.error(JSON.stringify(sendEmailErrors));
+  if (sendEmailResultErrorList.length > 0) {
+    console.error(JSON.stringify(sendEmailResultErrorList));
 
     throw new AppError('EmailDeliveryFailed', {
       message: 'Failed to send invite emails to one or more users.',
-      userMessage: `Failed to send invites to ${sendEmailErrors.length}/${organisationMemberInvites.length} users.`,
+      userMessage: `Failed to send invites to ${sendEmailResultErrorList.length}/${organisationMemberInvites.length} users.`,
     });
   }
 };
@@ -196,13 +186,19 @@ export const sendOrganisationMemberInviteEmail = async ({
     organisationName: organisation.name,
   });
 
-  const { branding, emailLanguage, senderEmail } = await getEmailContext({
+  const { branding, emailLanguage, senderEmail, emailsDisabled, emailTransport } = await getEmailContext({
     emailType: 'INTERNAL',
     source: {
       type: 'organisation',
       organisationId: organisation.id,
     },
   });
+
+  // Member invites can be sent to anyone, so block them when the organisation has email
+  // sending disabled.
+  if (emailsDisabled) {
+    return;
+  }
 
   const [html, text] = await Promise.all([
     renderEmailWithI18N(template, {
@@ -218,7 +214,7 @@ export const sendOrganisationMemberInviteEmail = async ({
 
   const i18n = await getI18nInstance(emailLanguage);
 
-  await sendMailWithRetry({
+  await sendMailWithRetry(emailTransport, {
     to: email,
     from: senderEmail,
     subject: i18n._(msg`You have been invited to join ${organisation.name} on Documenso`),

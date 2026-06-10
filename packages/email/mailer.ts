@@ -1,8 +1,7 @@
-import type { SendMailOptions, Transporter } from 'nodemailer';
-import { createTransport } from 'nodemailer';
-
 import { env } from '@documenso/lib/utils/env';
 import { ResendTransport } from '@documenso/nodemailer-resend';
+import type { SendMailOptions, Transporter } from 'nodemailer';
+import { createTransport } from 'nodemailer';
 
 import { MailChannelsTransport } from './transports/mailchannels';
 
@@ -64,18 +63,20 @@ const getTransport = (): Transporter => {
   }
 
   if (transport === 'resend') {
+    if (!env('NEXT_PRIVATE_RESEND_API_KEY')) {
+      throw new Error('Resend transport requires NEXT_PRIVATE_RESEND_API_KEY');
+    }
+
     return createTransport(
       ResendTransport.makeTransport({
-        apiKey: env('NEXT_PRIVATE_RESEND_API_KEY') || '',
+        apiKey: env('NEXT_PRIVATE_RESEND_API_KEY'),
       }),
     );
   }
 
   if (transport === 'smtp-api') {
     if (!env('NEXT_PRIVATE_SMTP_HOST') || !env('NEXT_PRIVATE_SMTP_APIKEY')) {
-      throw new Error(
-        'SMTP API transport requires NEXT_PRIVATE_SMTP_HOST and NEXT_PRIVATE_SMTP_APIKEY',
-      );
+      throw new Error('SMTP API transport requires NEXT_PRIVATE_SMTP_HOST and NEXT_PRIVATE_SMTP_APIKEY');
     }
 
     return createTransport({
@@ -106,7 +107,6 @@ const getTransport = (): Transporter => {
 
 export const mailer = getTransport();
 
-const RATE_LIMIT_DELAY_MS = 600;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
@@ -116,27 +116,28 @@ const sleep = async (ms: number) =>
   });
 
 /**
- * Send an email with retry logic for rate limit (429) errors.
+ * Send an email through the given transport with retry logic for rate limit (429) errors.
  * Retries with exponential backoff: 1s, 2s, 4s.
+ *
+ * The transport is supplied by the caller (typically the per-organisation `emailTransport`
+ * resolved via `getEmailContext`, which falls back to the global `mailer`). This keeps the
+ * 429 resilience working regardless of which transport an organisation is configured to use.
  *
  * Note: 429 detection is based on Resend transport error format ("[429]: rate_limit_exceeded").
  * For non-Resend transports (SMTP, MailChannels), this function behaves like a normal sendMail
  * since those transports do not produce errors matching this pattern.
  */
-export const sendMailWithRetry = async (options: SendMailOptions) => {
+export const sendMailWithRetry = async (transport: Transporter, options: SendMailOptions) => {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await mailer.sendMail(options);
+      return await transport.sendMail(options);
     } catch (error) {
       const isRateLimit =
-        error instanceof Error &&
-        (error.message.startsWith('[429]') || error.message.includes('rate_limit_exceeded'));
+        error instanceof Error && (error.message.startsWith('[429]') || error.message.includes('rate_limit_exceeded'));
 
       if (isRateLimit && attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(
-          `[email] Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`,
-        );
+        const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+        console.warn(`[email] Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await sleep(delay);
         continue;
       }
@@ -147,8 +148,3 @@ export const sendMailWithRetry = async (options: SendMailOptions) => {
 
   throw new Error('Unreachable');
 };
-
-/**
- * Delay to be used between sequential email sends to respect rate limits.
- */
-export const rateLimitDelay = async () => sleep(RATE_LIMIT_DELAY_MS);

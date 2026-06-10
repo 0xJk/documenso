@@ -1,12 +1,8 @@
+import { env } from '@documenso/lib/utils/env';
+import type { TGetPresignedPostUrlResponse, TUploadPdfResponse } from '@documenso/remix/server/api/files/files.types';
 import { DocumentDataType } from '@prisma/client';
 import { base64 } from '@scure/base';
 import { match } from 'ts-pattern';
-
-import { env } from '@documenso/lib/utils/env';
-import type {
-  TGetPresignedPostUrlResponse,
-  TUploadPdfResponse,
-} from '@documenso/remix/server/api/files/files.types';
 
 import { NEXT_PUBLIC_WEBAPP_URL } from '../../constants/app';
 import { AppError } from '../../errors/app-error';
@@ -49,7 +45,8 @@ export const putFile = async (file: File) => {
   const NEXT_PUBLIC_UPLOAD_TRANSPORT = env('NEXT_PUBLIC_UPLOAD_TRANSPORT');
 
   return await match(NEXT_PUBLIC_UPLOAD_TRANSPORT)
-    .with('s3', async () => putFileInS3(file))
+    .with('s3', async () => putFileInObjectStorage(file, {}))
+    .with('azure-blob', async () => putFileInObjectStorage(file, { 'x-ms-blob-type': 'BlockBlob' }))
     .otherwise(async () => putFileInDatabase(file));
 };
 
@@ -66,43 +63,37 @@ const putFileInDatabase = async (file: File) => {
   };
 };
 
-const putFileInS3 = async (file: File) => {
-  const getPresignedUrlResponse = await fetch(
-    `${NEXT_PUBLIC_WEBAPP_URL()}/api/files/presigned-post-url`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        fileName: file.name,
-        contentType: file.type,
-      }),
+const putFileInObjectStorage = async (file: File, extraHeaders: Record<string, string>) => {
+  const getPresignedUrlResponse = await fetch(`${NEXT_PUBLIC_WEBAPP_URL()}/api/files/presigned-post-url`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
     },
-  );
+    body: JSON.stringify({
+      fileName: file.name,
+      contentType: file.type,
+    }),
+  });
 
   if (!getPresignedUrlResponse.ok) {
-    throw new Error(
-      `Failed to get presigned post url, failed with status code ${getPresignedUrlResponse.status}`,
-    );
+    throw new Error(`Failed to get presigned post url, failed with status code ${getPresignedUrlResponse.status}`);
   }
 
   const { url, key }: TGetPresignedPostUrlResponse = await getPresignedUrlResponse.json();
 
   const body = await file.arrayBuffer();
 
-  const reponse = await fetch(url, {
+  const response = await fetch(url, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/octet-stream',
+      ...extraHeaders,
     },
     body,
   });
 
-  if (!reponse.ok) {
-    throw new Error(
-      `Failed to upload file "${file.name}", failed with status code ${reponse.status}`,
-    );
+  if (!response.ok) {
+    throw new Error(`Failed to upload file "${file.name}", failed with status code ${response.status}`);
   }
 
   return {
