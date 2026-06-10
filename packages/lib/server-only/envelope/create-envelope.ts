@@ -1,14 +1,3 @@
-import type { DocumentMeta, DocumentVisibility, TemplateType } from '@prisma/client';
-import {
-  DocumentSource,
-  EnvelopeType,
-  FolderType,
-  RecipientRole,
-  SendStatus,
-  SigningStatus,
-  WebhookTriggerEvents,
-} from '@prisma/client';
-
 import { AppError, AppErrorCode } from '@documenso/lib/errors/app-error';
 import type { PlaceholderInfo } from '@documenso/lib/server-only/pdf/auto-place-fields';
 import { convertPlaceholdersToFieldInputs } from '@documenso/lib/server-only/pdf/auto-place-fields';
@@ -20,6 +9,16 @@ import type { ApiRequestMetadata } from '@documenso/lib/universal/extract-reques
 import { nanoid, prefixedId } from '@documenso/lib/universal/id';
 import { createDocumentAuditLogData } from '@documenso/lib/utils/document-audit-logs';
 import { prisma } from '@documenso/prisma';
+import type { DocumentMeta, DocumentVisibility, TemplateType } from '@prisma/client';
+import {
+  DocumentSource,
+  EnvelopeType,
+  FolderType,
+  RecipientRole,
+  SendStatus,
+  SigningStatus,
+  WebhookTriggerEvents,
+} from '@prisma/client';
 
 import type {
   TDocumentAccessAuthTypes,
@@ -30,17 +29,16 @@ import type {
 import type { TDocumentFormValues } from '../../types/document-form-values';
 import type { TEnvelopeAttachmentType } from '../../types/envelope-attachment';
 import type { TFieldAndMeta } from '../../types/field-meta';
-import {
-  ZWebhookDocumentSchema,
-  mapEnvelopeToWebhookDocumentPayload,
-} from '../../types/webhook-payload';
+import { mapEnvelopeToWebhookDocumentPayload, ZWebhookDocumentSchema } from '../../types/webhook-payload';
 import { getFileServerSide } from '../../universal/upload/get-file.server';
 import { putPdfFileServerSide } from '../../universal/upload/put-file.server';
 import { extractDerivedDocumentMeta } from '../../utils/document';
 import { createDocumentAuthOptions, createRecipientAuthOptions } from '../../utils/document-auth';
 import { buildTeamWhereQuery } from '../../utils/teams';
 import { incrementDocumentId, incrementTemplateId } from '../envelope/increment-id';
+import { assertOrganisationRatesAndLimits } from '../rate-limit/assert-organisation-rates-and-limits';
 import { getTeamSettings } from '../team/get-team-settings';
+import { assertUserNotDisabledById } from '../user/assert-user-not-disabled';
 import { triggerWebhook } from '../webhooks/trigger/trigger-webhook';
 
 type CreateEnvelopeRecipientFieldOptions = TFieldAndMeta & {
@@ -97,6 +95,14 @@ export type CreateEnvelopeOptions = {
     data: string;
     type?: TEnvelopeAttachmentType;
   }>;
+
+  /**
+   * Whether to bypass adding default recipients.
+   *
+   * Defaults to false.
+   */
+  bypassDefaultRecipients?: boolean;
+
   meta?: Partial<Omit<DocumentMeta, 'id'>>;
   requestMetadata: ApiRequestMetadata;
 };
@@ -110,7 +116,13 @@ export const createEnvelope = async ({
   meta,
   requestMetadata,
   internalVersion,
+  bypassDefaultRecipients = false,
 }: CreateEnvelopeOptions) => {
+  // Refuse to create on behalf of a disabled account. Guards every route that
+  // funnels through here (document.create, envelope.use, template create,
+  // embedding template/document create, API v1) and the seed/job paths.
+  await assertUserNotDisabledById({ userId });
+
   const {
     type,
     title,
@@ -141,6 +153,17 @@ export const createEnvelope = async ({
   if (!team) {
     throw new AppError(AppErrorCode.NOT_FOUND, {
       message: 'Team not found',
+    });
+  }
+
+  // Enforce the organisation document-creation limit before doing any work.
+  // Only documents count towards the limit (templates are exempt).
+  if (type === EnvelopeType.DOCUMENT) {
+    await assertOrganisationRatesAndLimits({
+      organisationId: team.organisationId,
+      organisationClaim: team.organisation.organisationClaim,
+      type: 'document',
+      count: 1,
     });
   }
 
@@ -198,7 +221,7 @@ export const createEnvelope = async ({
 
         const titleToUse = item.title || title;
 
-        const newDocumentData = await putPdfFileServerSide({
+        const { documentData: newDocumentData } = await putPdfFileServerSide({
           name: titleToUse,
           type: 'application/pdf',
           arrayBuffer: async () => Promise.resolve(normalizedPdf),
@@ -256,24 +279,8 @@ export const createEnvelope = async ({
   // for uploads from the frontend
   const timezoneToUse = meta?.timezone || settings.documentTimezone || userTimezone;
 
-  const documentMeta = await prisma.documentMeta.create({
-    data: extractDerivedDocumentMeta(settings, {
-      ...meta,
-      timezone: timezoneToUse,
-    }),
-  });
-
-  const secondaryId =
-    type === EnvelopeType.DOCUMENT
-      ? await incrementDocumentId().then((v) => v.formattedDocumentId)
-      : await incrementTemplateId().then((v) => v.formattedTemplateId);
-
   const getValidatedDelegatedOwner = async () => {
-    if (
-      !settings.delegateDocumentOwnership ||
-      !delegatedDocumentOwner ||
-      requestMetadata.source === 'app'
-    ) {
+    if (!settings.delegateDocumentOwnership || !delegatedDocumentOwner || requestMetadata.source === 'app') {
       return null;
     }
 
@@ -302,7 +309,18 @@ export const createEnvelope = async ({
     return delegatedOwner;
   };
 
-  const delegatedOwner = await getValidatedDelegatedOwner();
+  const [documentMeta, secondaryId, delegatedOwner] = await Promise.all([
+    prisma.documentMeta.create({
+      data: extractDerivedDocumentMeta(settings, {
+        ...meta,
+        timezone: timezoneToUse,
+      }),
+    }),
+    type === EnvelopeType.DOCUMENT
+      ? incrementDocumentId().then((v) => v.formattedDocumentId)
+      : incrementTemplateId().then((v) => v.formattedTemplateId),
+    getValidatedDelegatedOwner(),
+  ]);
   const envelopeOwnerId = delegatedOwner?.id ?? userId;
 
   const createdEnvelope = await prisma.$transaction(async (tx) => {
@@ -355,17 +373,16 @@ export const createEnvelope = async ({
 
     const firstEnvelopeItem = envelope.envelopeItems[0];
 
-    const defaultRecipients = settings.defaultRecipients
-      ? ZDefaultRecipientsSchema.parse(settings.defaultRecipients)
-      : [];
+    const defaultRecipients =
+      settings.defaultRecipients && !bypassDefaultRecipients
+        ? ZDefaultRecipientsSchema.parse(settings.defaultRecipients)
+        : [];
 
-    const mappedDefaultRecipients: CreateEnvelopeRecipientOptions[] = defaultRecipients.map(
-      (recipient) => ({
-        email: recipient.email,
-        name: recipient.name,
-        role: recipient.role,
-      }),
-    );
+    const mappedDefaultRecipients: CreateEnvelopeRecipientOptions[] = defaultRecipients.map((recipient) => ({
+      email: recipient.email,
+      name: recipient.name,
+      role: recipient.role,
+    }));
 
     const allRecipients = [...(data.recipients || []), ...mappedDefaultRecipients];
 
@@ -417,8 +434,7 @@ export const createEnvelope = async ({
             signingOrder: recipient.signingOrder,
             token: nanoid(),
             sendStatus: recipient.role === RecipientRole.CC ? SendStatus.SENT : SendStatus.NOT_SENT,
-            signingStatus:
-              recipient.role === RecipientRole.CC ? SigningStatus.SIGNED : SigningStatus.NOT_SIGNED,
+            signingStatus: recipient.role === RecipientRole.CC ? SigningStatus.SIGNED : SigningStatus.NOT_SIGNED,
             authOptions: recipientAuthOptions,
             fields: {
               createMany: {
@@ -431,9 +447,7 @@ export const createEnvelope = async ({
     );
 
     // Create fields from PDF placeholders (extracted at upload time).
-    const itemsWithPlaceholders = envelopeItems.filter(
-      (item) => item.placeholders && item.placeholders.length > 0,
-    );
+    const itemsWithPlaceholders = envelopeItems.filter((item) => item.placeholders && item.placeholders.length > 0);
 
     if (itemsWithPlaceholders.length > 0) {
       // Collect all unique recipient placeholder references (e.g. "r1", "r2").
@@ -463,23 +477,18 @@ export const createEnvelope = async ({
 
       // If recipients were not provided, create placeholder recipients even when defaults exist.
       if (shouldCreatePlaceholderRecipients) {
-        const existingRecipientEmails = new Set(
-          availableRecipients.map((recipient) => recipient.email.toLowerCase()),
-        );
+        const existingRecipientEmails = new Set(availableRecipients.map((recipient) => recipient.email.toLowerCase()));
 
-        const placeholderRecipients = Array.from(
-          uniqueRecipientRefs.entries(),
-          ([recipientIndex, name]) => ({
-            envelopeId: envelope.id,
-            email: `recipient.${recipientIndex}@documenso.com`,
-            name,
-            role: RecipientRole.SIGNER,
-            signingOrder: recipientIndex,
-            token: nanoid(),
-            sendStatus: SendStatus.NOT_SENT,
-            signingStatus: SigningStatus.NOT_SIGNED,
-          }),
-        ).filter((recipient) => !existingRecipientEmails.has(recipient.email.toLowerCase()));
+        const placeholderRecipients = Array.from(uniqueRecipientRefs.entries(), ([recipientIndex, name]) => ({
+          envelopeId: envelope.id,
+          email: `recipient.${recipientIndex}@documenso.com`,
+          name,
+          role: RecipientRole.SIGNER,
+          signingOrder: recipientIndex,
+          token: nanoid(),
+          sendStatus: SendStatus.NOT_SENT,
+          signingStatus: SigningStatus.NOT_SIGNED,
+        })).filter((recipient) => !existingRecipientEmails.has(recipient.email.toLowerCase()));
 
         if (placeholderRecipients.length > 0) {
           await tx.recipient.createMany({
@@ -495,9 +504,7 @@ export const createEnvelope = async ({
       }
 
       for (const item of itemsWithPlaceholders) {
-        const envelopeItem = envelope.envelopeItems.find(
-          (ei) => ei.documentDataId === item.documentDataId,
-        );
+        const envelopeItem = envelope.envelopeItems.find((ei) => ei.documentDataId === item.documentDataId);
 
         if (!envelopeItem) {
           continue;
@@ -572,7 +579,7 @@ export const createEnvelope = async ({
       });
     }
 
-    // Only create audit logs and webhook events for documents.
+    // Only create audit logs for documents.
     if (type === EnvelopeType.DOCUMENT) {
       await tx.documentAuditLog.create({
         data: createDocumentAuditLogData({
@@ -609,17 +616,28 @@ export const createEnvelope = async ({
           }),
         });
       }
-
-      await triggerWebhook({
-        event: WebhookTriggerEvents.DOCUMENT_CREATED,
-        data: ZWebhookDocumentSchema.parse(mapEnvelopeToWebhookDocumentPayload(createdEnvelope)),
-        userId,
-        teamId,
-      });
     }
 
     return createdEnvelope;
   });
+
+  // Trigger webhook outside the transaction to avoid holding the connection
+  // open during network I/O.
+  if (type === EnvelopeType.DOCUMENT) {
+    await triggerWebhook({
+      event: WebhookTriggerEvents.DOCUMENT_CREATED,
+      data: ZWebhookDocumentSchema.parse(mapEnvelopeToWebhookDocumentPayload(createdEnvelope)),
+      userId,
+      teamId,
+    });
+  } else if (type === EnvelopeType.TEMPLATE) {
+    await triggerWebhook({
+      event: WebhookTriggerEvents.TEMPLATE_CREATED,
+      data: ZWebhookDocumentSchema.parse(mapEnvelopeToWebhookDocumentPayload(createdEnvelope)),
+      userId,
+      teamId,
+    });
+  }
 
   return createdEnvelope;
 };
