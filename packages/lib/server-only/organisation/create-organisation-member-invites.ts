@@ -2,6 +2,7 @@ import {
   assertMemberCountWithinCap,
   syncMemberCountWithStripeSeatPlan,
 } from '@documenso/ee/server-only/stripe/update-subscription-item-quantity';
+import { sendMailWithRetry } from '@documenso/email/mailer';
 import { OrganisationInviteEmailTemplate } from '@documenso/email/templates/organisation-invite';
 import { NEXT_PUBLIC_WEBAPP_URL } from '@documenso/lib/constants/app';
 import { ORGANISATION_MEMBER_ROLE_PERMISSIONS_MAP } from '@documenso/lib/constants/organisations';
@@ -14,13 +15,11 @@ import type { Organisation, Prisma } from '@prisma/client';
 import { OrganisationMemberInviteStatus } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { createElement } from 'react';
-
 import { getI18nInstance } from '../../client-only/providers/i18n-server';
 import { generateDatabaseId } from '../../universal/id';
 import { validateIfSubscriptionIsRequired } from '../../utils/billing';
 import { buildOrganisationWhereQuery } from '../../utils/organisations';
 import { renderEmailWithI18N } from '../../utils/render-email-with-i18n';
-import { sendMailWithRetry } from '@documenso/email/mailer';
 import { getEmailContext } from '../email/get-email-context';
 import { getMemberOrganisationRole } from '../team/get-member-roles';
 

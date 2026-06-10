@@ -1,10 +1,10 @@
+import { sendMailWithRetry } from '@documenso/email/mailer';
 import DocumentCancelTemplate from '@documenso/email/templates/document-cancel';
 import { prisma } from '@documenso/prisma';
 import { msg } from '@lingui/core/macro';
 import type { DocumentMeta, Envelope, Recipient, User } from '@prisma/client';
 import { DocumentStatus, EnvelopeType, RecipientRole, SendStatus, WebhookTriggerEvents } from '@prisma/client';
 import { createElement } from 'react';
-
 import { getI18nInstance } from '../../client-only/providers/i18n-server';
 import { NEXT_PUBLIC_WEBAPP_URL } from '../../constants/app';
 import { AppError, AppErrorCode } from '../../errors/app-error';
@@ -17,7 +17,6 @@ import { createDocumentAuditLogData } from '../../utils/document-audit-logs';
 import { type EnvelopeIdOptions, unsafeBuildEnvelopeIdQuery } from '../../utils/envelope';
 import { isRecipientEmailValidForSending } from '../../utils/recipients';
 import { renderEmailWithI18N } from '../../utils/render-email-with-i18n';
-import { sendMailWithRetry } from '@documenso/email/mailer';
 import { getEmailContext } from '../email/get-email-context';
 import { getMemberRoles } from '../team/get-member-roles';
 import { triggerWebhook } from '../webhooks/trigger/trigger-webhook';

@@ -133,14 +133,11 @@ export const sendMailWithRetry = async (transport: Transporter, options: SendMai
       return await transport.sendMail(options);
     } catch (error) {
       const isRateLimit =
-        error instanceof Error &&
-        (error.message.startsWith('[429]') || error.message.includes('rate_limit_exceeded'));
+        error instanceof Error && (error.message.startsWith('[429]') || error.message.includes('rate_limit_exceeded'));
 
       if (isRateLimit && attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-        console.warn(
-          `[email] Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`,
-        );
+        const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+        console.warn(`[email] Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await sleep(delay);
         continue;
       }

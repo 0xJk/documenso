@@ -1,3 +1,4 @@
+import { sendMailWithRetry } from '@documenso/email/mailer';
 import RecipientRemovedFromDocumentTemplate from '@documenso/email/templates/recipient-removed-from-document';
 import { DOCUMENT_AUDIT_LOG_TYPE } from '@documenso/lib/types/document-audit-logs';
 import type { TRecipientAccessAuthTypes } from '@documenso/lib/types/document-auth';
@@ -12,7 +13,6 @@ import type { Recipient } from '@prisma/client';
 import { EnvelopeType, RecipientRole, SendStatus, SigningStatus } from '@prisma/client';
 import { createElement } from 'react';
 import { isDeepEqual } from 'remeda';
-
 import { getI18nInstance } from '../../client-only/providers/i18n-server';
 import { NEXT_PUBLIC_WEBAPP_URL } from '../../constants/app';
 import { AppError, AppErrorCode } from '../../errors/app-error';
@@ -21,7 +21,6 @@ import { type EnvelopeIdOptions, mapSecondaryIdToDocumentId } from '../../utils/
 import { logger } from '../../utils/logger';
 import { canRecipientBeModified, isRecipientEmailValidForSending } from '../../utils/recipients';
 import { renderEmailWithI18N } from '../../utils/render-email-with-i18n';
-import { sendMailWithRetry } from '@documenso/email/mailer';
 import { getEmailContext } from '../email/get-email-context';
 import { getEnvelopeWhereInput } from '../envelope/get-envelope-by-id';
 import { assertOrganisationRatesAndLimits } from '../rate-limit/assert-organisation-rates-and-limits';
